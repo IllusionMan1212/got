@@ -289,9 +289,6 @@ func computeSignature(algorithm jws.SigningAlgorithm, signingKey jws.SigningKey,
 				hashed := sha.Sum(nil)
 
 				sig, err = rsa.SignPKCS1v15(nil, signingKey, crypto.SHA256, hashed)
-				if err != nil {
-					return nil, err
-				}
 			} else if algorithm == jws.RS384 {
 				sha := sha512.New384()
 				sha.Write([]byte(encodedHeader))
@@ -300,9 +297,6 @@ func computeSignature(algorithm jws.SigningAlgorithm, signingKey jws.SigningKey,
 				hashed := sha.Sum(nil)
 
 				sig, err = rsa.SignPKCS1v15(nil, signingKey, crypto.SHA384, hashed)
-				if err != nil {
-					return nil, err
-				}
 			} else if algorithm == jws.RS512 {
 				sha := sha512.New()
 				sha.Write([]byte(encodedHeader))
@@ -311,9 +305,6 @@ func computeSignature(algorithm jws.SigningAlgorithm, signingKey jws.SigningKey,
 				hashed := sha.Sum(nil)
 
 				sig, err = rsa.SignPKCS1v15(nil, signingKey, crypto.SHA512, hashed)
-				if err != nil {
-					return nil, err
-				}
 			} else if algorithm == jws.PS256 {
 				sha := sha256.New()
 				sha.Write([]byte(encodedHeader))
@@ -388,8 +379,7 @@ func computeSignature(algorithm jws.SigningAlgorithm, signingKey jws.SigningKey,
 			return nil, ErrInvalidKey
 		}
 
-		// TODO: impl
-		panic("unimplemented")
+		signature = ed25519.Sign(signingKey, []byte(strings.Join([]string{encodedHeader, encodedPayload}, ".")))
 	case *ecdsa.PrivateKey:
 		if signingKey == nil {
 			return nil, ErrInvalidKey
@@ -397,8 +387,35 @@ func computeSignature(algorithm jws.SigningAlgorithm, signingKey jws.SigningKey,
 
 		switch algorithm {
 		case jws.ES256, jws.ES384, jws.ES512:
-			// TODO: impl
-			panic("unimplemented")
+			var sig []byte
+
+			if algorithm == jws.ES256 {
+				sha := sha256.New()
+				sha.Write([]byte(encodedHeader))
+				sha.Write([]byte{'.'})
+				sha.Write([]byte(encodedPayload))
+				hashed := sha.Sum(nil)
+
+				sig, err = ecdsa.SignASN1(cryptorand.Reader, signingKey, hashed)
+			} else if algorithm == jws.ES384 {
+				sha := sha512.New384()
+				sha.Write([]byte(encodedHeader))
+				sha.Write([]byte{'.'})
+				sha.Write([]byte(encodedPayload))
+				hashed := sha.Sum(nil)
+
+				sig, err = ecdsa.SignASN1(cryptorand.Reader, signingKey, hashed)
+			} else if algorithm == jws.ES512 {
+				sha := sha512.New()
+				sha.Write([]byte(encodedHeader))
+				sha.Write([]byte{'.'})
+				sha.Write([]byte(encodedPayload))
+				hashed := sha.Sum(nil)
+
+				sig, err = ecdsa.SignASN1(cryptorand.Reader, signingKey, hashed)
+			}
+
+			signature = sig
 		default:
 			return nil, ErrKeyAlgorithmIncompatibility
 		}
@@ -524,13 +541,35 @@ func verifySignature(algorithm jws.SigningAlgorithm, publicKey jws.SigningKey, e
 			return false
 		}
 
-		// TODO: impl
-		panic("unimplemented")
+		return ed25519.Verify(publicKey, []byte(strings.Join([]string{encodedHeader, encodedPayload}, ".")), signature)
 	case ecdsa.PublicKey:
 		switch algorithm {
 		case jws.ES256, jws.ES384, jws.ES512:
-			// TODO: impl
-			panic("unimplemented")
+			if algorithm == jws.ES256 {
+				sha := sha256.New()
+				sha.Write([]byte(encodedHeader))
+				sha.Write([]byte{'.'})
+				sha.Write([]byte(encodedPayload))
+				hashed := sha.Sum(nil)
+
+				return ecdsa.VerifyASN1(&publicKey, hashed, signature)
+			} else if algorithm == jws.ES384 {
+				sha := sha512.New384()
+				sha.Write([]byte(encodedHeader))
+				sha.Write([]byte{'.'})
+				sha.Write([]byte(encodedPayload))
+				hashed := sha.Sum(nil)
+
+				return ecdsa.VerifyASN1(&publicKey, hashed, signature)
+			} else if algorithm == jws.ES512 {
+				sha := sha512.New()
+				sha.Write([]byte(encodedHeader))
+				sha.Write([]byte{'.'})
+				sha.Write([]byte(encodedPayload))
+				hashed := sha.Sum(nil)
+
+				return ecdsa.VerifyASN1(&publicKey, hashed, signature)
+			}
 		default:
 			return false
 		}
