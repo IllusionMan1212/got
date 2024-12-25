@@ -2,20 +2,28 @@ package got
 
 import (
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/hmac"
 	cryptorand "crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/subtle"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"got/jws"
 	"hash"
+	"reflect"
 	"strings"
 	"time"
+)
+
+var (
+	ErrInvalidKey                  = errors.New("Invalid key")
+	ErrKeyAlgorithmIncompatibility = errors.New("Algorithm and key are incompatible. Refer to the docs for compatible keys and algorithms")
 )
 
 type ValidationError string
@@ -171,7 +179,7 @@ type Jwt struct {
 	header     JWTHeader
 	payload    JWTPayload
 	signature  JWTSignature
-	signingKey []byte
+	signingKey jws.SigningKey
 }
 
 func (j *Jwt) SetIssuer(iss string) *Jwt {
@@ -239,23 +247,17 @@ func (j Jwt) Sign() (string, error) {
 	return strings.Join([]string{hEnc, pEnc, sEnc}, "."), nil
 }
 
-var privKey *rsa.PrivateKey
-
 // CreateJWS() creates a JWS JWT.
-// TODO: change this to accept a SigningKey type which is just an interface{}
-// And then we can type check it during runtime
-func CreateJWS(a jws.SigningAlgorithm, signingKey []byte) *Jwt {
+func CreateJWS(a jws.SigningAlgorithm, signingKey jws.SigningKey) *Jwt {
 	var jwt Jwt
 	var h JWTHeader
-
-	privKey, _ = rsa.GenerateKey(cryptorand.Reader, 2048)
 
 	h.Type = "JWT"
 	h.Algorithm = a
 
 	// TODO: something something delete this and something something do the same for elliptic curves and PSS
-	fmt.Println(base64.StdEncoding.EncodeToString(x509.MarshalPKCS1PublicKey(&privKey.PublicKey)))
-	fmt.Println(base64.StdEncoding.EncodeToString(x509.MarshalPKCS1PrivateKey(privKey)))
+	// fmt.Println(base64.StdEncoding.EncodeToString(x509.MarshalPKCS1PublicKey(&privKey.PublicKey)))
+	// fmt.Println(base64.StdEncoding.EncodeToString(x509.MarshalPKCS1PrivateKey(privKey)))
 
 	jwt.signingKey = signingKey
 	jwt.header = h
@@ -265,106 +267,157 @@ func CreateJWS(a jws.SigningAlgorithm, signingKey []byte) *Jwt {
 	return &jwt
 }
 
-func computeSignature(algorithm jws.SigningAlgorithm, signingKey []byte, encodedHeader, encodedPayload string) (signature []byte, err error) {
-	switch algorithm {
-	case jws.None:
+func computeSignature(algorithm jws.SigningAlgorithm, signingKey jws.SigningKey, encodedHeader, encodedPayload string) (signature []byte, err error) {
+	switch signingKey := any(signingKey).(type) {
+	case nil:
+		if algorithm != jws.None {
+			return nil, ErrKeyAlgorithmIncompatibility
+		}
+
 		return nil, nil
-	case jws.HS256, jws.HS384, jws.HS512:
-		var h hash.Hash
-		if algorithm == jws.HS256 {
-			h = hmac.New(sha256.New, signingKey)
-		} else if algorithm == jws.HS384 {
-			h = hmac.New(sha512.New384, signingKey)
-		} else if algorithm == jws.HS512 {
-			h = hmac.New(sha512.New, signingKey)
+	case *rsa.PrivateKey:
+		if signingKey == nil {
+			return nil, ErrInvalidKey
 		}
 
-		h.Write([]byte(encodedHeader))
-		h.Write([]byte{'.'})
-		h.Write([]byte(encodedPayload))
-
-		hmacsha := h.Sum(nil)
-
-		signature = hmacsha
-	case jws.RS256, jws.RS384, jws.RS512:
-		// TODO: key of size 2048 bits or larger MUST be used here.
-		var h []byte
-		if algorithm == jws.RS256 {
-			sha := sha256.New()
-			sha.Write([]byte(encodedHeader))
-			sha.Write([]byte{'.'})
-			sha.Write([]byte(encodedPayload))
-			hashed := sha.Sum(nil)
-
-			h, err = rsa.SignPKCS1v15(nil, privKey, crypto.SHA256, hashed)
-			if err != nil {
-				return nil, err
+		switch algorithm {
+		case jws.RS256, jws.RS384, jws.RS512, jws.PS256, jws.PS384, jws.PS512:
+			if signingKey.Size()*8 < 2048 {
+				return nil, errors.New("Insufficient key size. 2048 bits or more must be used.")
 			}
-		} else if algorithm == jws.RS384 {
-			sha := sha512.New384()
-			sha.Write([]byte(encodedHeader))
-			sha.Write([]byte{'.'})
-			sha.Write([]byte(encodedPayload))
-			hashed := sha.Sum(nil)
 
-			h, err = rsa.SignPKCS1v15(nil, privKey, crypto.SHA384, hashed)
-			if err != nil {
-				return nil, err
-			}
-		} else if algorithm == jws.RS512 {
-			sha := sha512.New()
-			sha.Write([]byte(encodedHeader))
-			sha.Write([]byte{'.'})
-			sha.Write([]byte(encodedPayload))
-			hashed := sha.Sum(nil)
+			var h []byte
+			if algorithm == jws.RS256 {
+				sha := sha256.New()
+				sha.Write([]byte(encodedHeader))
+				sha.Write([]byte{'.'})
+				sha.Write([]byte(encodedPayload))
+				hashed := sha.Sum(nil)
 
-			h, err = rsa.SignPKCS1v15(nil, privKey, crypto.SHA512, hashed)
-			if err != nil {
-				return nil, err
+				h, err = rsa.SignPKCS1v15(nil, signingKey, crypto.SHA256, hashed)
+				if err != nil {
+					return nil, err
+				}
+			} else if algorithm == jws.RS384 {
+				sha := sha512.New384()
+				sha.Write([]byte(encodedHeader))
+				sha.Write([]byte{'.'})
+				sha.Write([]byte(encodedPayload))
+				hashed := sha.Sum(nil)
+
+				h, err = rsa.SignPKCS1v15(nil, signingKey, crypto.SHA384, hashed)
+				if err != nil {
+					return nil, err
+				}
+			} else if algorithm == jws.RS512 {
+				sha := sha512.New()
+				sha.Write([]byte(encodedHeader))
+				sha.Write([]byte{'.'})
+				sha.Write([]byte(encodedPayload))
+				hashed := sha.Sum(nil)
+
+				h, err = rsa.SignPKCS1v15(nil, signingKey, crypto.SHA512, hashed)
+				if err != nil {
+					return nil, err
+				}
+				// TODO: PSXXX are incorrect. We get an invalid signature when verifying.
+			} else if algorithm == jws.PS256 {
+				sha := sha256.New()
+				sha.Write([]byte(encodedHeader))
+				sha.Write([]byte{'.'})
+				sha.Write([]byte(encodedPayload))
+				hashed := sha.Sum(nil)
+
+				h, err = rsa.SignPSS(cryptorand.Reader, signingKey, crypto.SHA256, hashed, &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthAuto, Hash: crypto.SHA256})
+			} else if algorithm == jws.PS384 {
+				sha := sha512.New384()
+				sha.Write([]byte(encodedHeader))
+				sha.Write([]byte{'.'})
+				sha.Write([]byte(encodedPayload))
+				hashed := sha.Sum(nil)
+
+				h, err = rsa.SignPSS(cryptorand.Reader, signingKey, crypto.SHA384, hashed, nil)
+			} else if algorithm == jws.PS512 {
+				sha := sha512.New()
+				sha.Write([]byte(encodedHeader))
+				sha.Write([]byte{'.'})
+				sha.Write([]byte(encodedPayload))
+				hashed := sha.Sum(nil)
+
+				h, err = rsa.SignPSS(cryptorand.Reader, signingKey, crypto.SHA512, hashed, nil)
 			}
+
+			signature = h
+		default:
+			return nil, ErrKeyAlgorithmIncompatibility
+		}
+	case []byte:
+		if signingKey == nil {
+			return nil, ErrInvalidKey
 		}
 
-		signature = h
-	case jws.PS256, jws.PS384, jws.PS512:
-		// TODO: This is incorrect. We get an invalid signature when verifying.
-		var h []byte
+		switch algorithm {
+		case jws.HS256, jws.HS384, jws.HS512:
+			var h hash.Hash
+			if algorithm == jws.HS256 {
+				if len(signingKey) < 32 {
+					return nil, errors.New("Insufficient key length. Key must have at least 32 bytes for HS256")
+				}
+				h = hmac.New(sha256.New, signingKey)
+			} else if algorithm == jws.HS384 {
+				if len(signingKey) < 48 {
+					return nil, errors.New("Insufficient key length. Key must have at least 48 bytes for HS384")
+				}
+				h = hmac.New(sha512.New384, signingKey)
+			} else if algorithm == jws.HS512 {
+				if len(signingKey) < 64 {
+					return nil, errors.New("Insufficient key length. Key must have at least 64 bytes for HS512")
+				}
+				h = hmac.New(sha512.New, signingKey)
+			}
 
-		if algorithm == jws.PS256 {
-			sha := sha256.New()
-			sha.Write([]byte(encodedHeader))
-			sha.Write([]byte{'.'})
-			sha.Write([]byte(encodedPayload))
-			hashed := sha.Sum(nil)
+			h.Write([]byte(encodedHeader))
+			h.Write([]byte{'.'})
+			h.Write([]byte(encodedPayload))
 
-			h, err = rsa.SignPSS(cryptorand.Reader, privKey, crypto.SHA256, hashed, &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthAuto, Hash: crypto.SHA256})
-		} else if algorithm == jws.PS384 {
-			sha := sha512.New384()
-			sha.Write([]byte(encodedHeader))
-			sha.Write([]byte{'.'})
-			sha.Write([]byte(encodedPayload))
-			hashed := sha.Sum(nil)
+			hmacsha := h.Sum(nil)
 
-			h, err = rsa.SignPSS(cryptorand.Reader, privKey, crypto.SHA384, hashed, nil)
-		} else if algorithm == jws.PS512 {
-			sha := sha512.New()
-			sha.Write([]byte(encodedHeader))
-			sha.Write([]byte{'.'})
-			sha.Write([]byte(encodedPayload))
-			hashed := sha.Sum(nil)
-
-			h, err = rsa.SignPSS(cryptorand.Reader, privKey, crypto.SHA512, hashed, nil)
+			signature = hmacsha
+		default:
+			return nil, ErrKeyAlgorithmIncompatibility
+		}
+	case ed25519.PrivateKey:
+		if algorithm != jws.EdDSA {
+			return nil, ErrKeyAlgorithmIncompatibility
 		}
 
-		signature = h
-	case jws.ES256, jws.ES384, jws.ES512:
-		panic("TODO: ESXXX algo not supported")
+		if signingKey == nil {
+			return nil, ErrInvalidKey
+		}
+
+		// TODO: impl
+		panic("unimplemented")
+	case *ecdsa.PrivateKey:
+		if signingKey == nil {
+			return nil, ErrInvalidKey
+		}
+
+		switch algorithm {
+		case jws.ES256, jws.ES384, jws.ES512:
+			// TODO: impl
+			panic("unimplemented")
+		default:
+			return nil, ErrKeyAlgorithmIncompatibility
+		}
+	default:
+		return nil, fmt.Errorf("Invalid key type: %v", reflect.TypeOf(signingKey))
 	}
 
-	return signature, err
+	return
 }
 
 // https://datatracker.ietf.org/doc/html/rfc7519#section-7.2
-func Verify(s string, signingKey []byte) error {
+func Verify(s string, signingKey jws.SigningKey) error {
 	parts := strings.Split(s, ".")
 	// 1. Verify that the JWT contains at least one period (".") character
 	if len(parts) <= 1 {
