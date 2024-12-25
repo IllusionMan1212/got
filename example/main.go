@@ -3,6 +3,8 @@ package main
 import (
 	cryptorand "crypto/rand"
 	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
 	"fmt"
 	"got"
 	"got/jws"
@@ -16,6 +18,9 @@ func main() {
 		fmt.Println(err)
 		return
 	}
+
+	fmt.Printf("PublicKey: %v\n", base64.StdEncoding.EncodeToString(x509.MarshalPKCS1PublicKey(&rsaKey.PublicKey)))
+	fmt.Printf("PrivateKey: %v\n", base64.StdEncoding.EncodeToString(x509.MarshalPKCS1PrivateKey(rsaKey)))
 
 	jwt, err := got.
 		CreateJWS(jws.RS512, rsaKey).
@@ -34,7 +39,7 @@ func main() {
 	// The need for a parsing func is so we can extract information from the JWT's payload
 	// I think we'll return a map[string]any as the payload from the parsing func
 
-	err = got.Verify(jwt, rsaKey)
+	err = got.Verify(jwt, rsaKey.PublicKey)
 	if err != nil {
 		fmt.Println(err)
 		return

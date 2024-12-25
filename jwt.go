@@ -24,13 +24,11 @@ import (
 var (
 	ErrInvalidKey                  = errors.New("Invalid key")
 	ErrKeyAlgorithmIncompatibility = errors.New("Algorithm and key are incompatible. Refer to the docs for compatible keys and algorithms")
+	ErrValidation                  = errors.New("Invalid signature")
+	ErrMissingAlgorithm            = errors.New("Algorithm is missing")
+	ErrInvalidJSON                 = errors.New("Invalid JSON")
+	ErrMalformedJWT                = errors.New("Malformed JWT")
 )
-
-type ValidationError string
-
-func (e ValidationError) Error() string {
-	return string(e)
-}
 
 type JWTHeader struct {
 	Algorithm jws.SigningAlgorithm `json:"alg,omitempty"`
@@ -255,10 +253,6 @@ func CreateJWS(a jws.SigningAlgorithm, signingKey jws.SigningKey) *Jwt {
 	h.Type = "JWT"
 	h.Algorithm = a
 
-	// TODO: something something delete this and something something do the same for elliptic curves and PSS
-	// fmt.Println(base64.StdEncoding.EncodeToString(x509.MarshalPKCS1PublicKey(&privKey.PublicKey)))
-	// fmt.Println(base64.StdEncoding.EncodeToString(x509.MarshalPKCS1PrivateKey(privKey)))
-
 	jwt.signingKey = signingKey
 	jwt.header = h
 	jwt.payload.IssuedAt = time.Now().Unix()
@@ -286,7 +280,7 @@ func computeSignature(algorithm jws.SigningAlgorithm, signingKey jws.SigningKey,
 				return nil, errors.New("Insufficient key size. 2048 bits or more must be used.")
 			}
 
-			var h []byte
+			var sig []byte
 			if algorithm == jws.RS256 {
 				sha := sha256.New()
 				sha.Write([]byte(encodedHeader))
@@ -294,7 +288,7 @@ func computeSignature(algorithm jws.SigningAlgorithm, signingKey jws.SigningKey,
 				sha.Write([]byte(encodedPayload))
 				hashed := sha.Sum(nil)
 
-				h, err = rsa.SignPKCS1v15(nil, signingKey, crypto.SHA256, hashed)
+				sig, err = rsa.SignPKCS1v15(nil, signingKey, crypto.SHA256, hashed)
 				if err != nil {
 					return nil, err
 				}
@@ -305,7 +299,7 @@ func computeSignature(algorithm jws.SigningAlgorithm, signingKey jws.SigningKey,
 				sha.Write([]byte(encodedPayload))
 				hashed := sha.Sum(nil)
 
-				h, err = rsa.SignPKCS1v15(nil, signingKey, crypto.SHA384, hashed)
+				sig, err = rsa.SignPKCS1v15(nil, signingKey, crypto.SHA384, hashed)
 				if err != nil {
 					return nil, err
 				}
@@ -316,11 +310,10 @@ func computeSignature(algorithm jws.SigningAlgorithm, signingKey jws.SigningKey,
 				sha.Write([]byte(encodedPayload))
 				hashed := sha.Sum(nil)
 
-				h, err = rsa.SignPKCS1v15(nil, signingKey, crypto.SHA512, hashed)
+				sig, err = rsa.SignPKCS1v15(nil, signingKey, crypto.SHA512, hashed)
 				if err != nil {
 					return nil, err
 				}
-				// TODO: PSXXX are incorrect. We get an invalid signature when verifying.
 			} else if algorithm == jws.PS256 {
 				sha := sha256.New()
 				sha.Write([]byte(encodedHeader))
@@ -328,7 +321,7 @@ func computeSignature(algorithm jws.SigningAlgorithm, signingKey jws.SigningKey,
 				sha.Write([]byte(encodedPayload))
 				hashed := sha.Sum(nil)
 
-				h, err = rsa.SignPSS(cryptorand.Reader, signingKey, crypto.SHA256, hashed, &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthAuto, Hash: crypto.SHA256})
+				sig, err = rsa.SignPSS(cryptorand.Reader, signingKey, crypto.SHA256, hashed, &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash})
 			} else if algorithm == jws.PS384 {
 				sha := sha512.New384()
 				sha.Write([]byte(encodedHeader))
@@ -336,7 +329,7 @@ func computeSignature(algorithm jws.SigningAlgorithm, signingKey jws.SigningKey,
 				sha.Write([]byte(encodedPayload))
 				hashed := sha.Sum(nil)
 
-				h, err = rsa.SignPSS(cryptorand.Reader, signingKey, crypto.SHA384, hashed, nil)
+				sig, err = rsa.SignPSS(cryptorand.Reader, signingKey, crypto.SHA384, hashed, &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash})
 			} else if algorithm == jws.PS512 {
 				sha := sha512.New()
 				sha.Write([]byte(encodedHeader))
@@ -344,10 +337,10 @@ func computeSignature(algorithm jws.SigningAlgorithm, signingKey jws.SigningKey,
 				sha.Write([]byte(encodedPayload))
 				hashed := sha.Sum(nil)
 
-				h, err = rsa.SignPSS(cryptorand.Reader, signingKey, crypto.SHA512, hashed, nil)
+				sig, err = rsa.SignPSS(cryptorand.Reader, signingKey, crypto.SHA512, hashed, &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash})
 			}
 
-			signature = h
+			signature = sig
 		default:
 			return nil, ErrKeyAlgorithmIncompatibility
 		}
@@ -358,29 +351,29 @@ func computeSignature(algorithm jws.SigningAlgorithm, signingKey jws.SigningKey,
 
 		switch algorithm {
 		case jws.HS256, jws.HS384, jws.HS512:
-			var h hash.Hash
+			var sig hash.Hash
 			if algorithm == jws.HS256 {
 				if len(signingKey) < 32 {
 					return nil, errors.New("Insufficient key length. Key must have at least 32 bytes for HS256")
 				}
-				h = hmac.New(sha256.New, signingKey)
+				sig = hmac.New(sha256.New, signingKey)
 			} else if algorithm == jws.HS384 {
 				if len(signingKey) < 48 {
 					return nil, errors.New("Insufficient key length. Key must have at least 48 bytes for HS384")
 				}
-				h = hmac.New(sha512.New384, signingKey)
+				sig = hmac.New(sha512.New384, signingKey)
 			} else if algorithm == jws.HS512 {
 				if len(signingKey) < 64 {
 					return nil, errors.New("Insufficient key length. Key must have at least 64 bytes for HS512")
 				}
-				h = hmac.New(sha512.New, signingKey)
+				sig = hmac.New(sha512.New, signingKey)
 			}
 
-			h.Write([]byte(encodedHeader))
-			h.Write([]byte{'.'})
-			h.Write([]byte(encodedPayload))
+			sig.Write([]byte(encodedHeader))
+			sig.Write([]byte{'.'})
+			sig.Write([]byte(encodedPayload))
 
-			hmacsha := h.Sum(nil)
+			hmacsha := sig.Sum(nil)
 
 			signature = hmacsha
 		default:
@@ -416,12 +409,143 @@ func computeSignature(algorithm jws.SigningAlgorithm, signingKey jws.SigningKey,
 	return
 }
 
+// The HMAC publicKey is the same signing key because its a symmetric key.
+func verifySignature(algorithm jws.SigningAlgorithm, publicKey jws.SigningKey, encodedHeader, encodedPayload string, signature []byte) bool {
+	switch publicKey := any(publicKey).(type) {
+	case nil:
+		if algorithm != jws.None {
+			return false
+		}
+
+		return true
+	case rsa.PublicKey:
+		switch algorithm {
+		case jws.RS256, jws.RS384, jws.RS512, jws.PS256, jws.PS384, jws.PS512:
+			if publicKey.Size()*8 < 2048 {
+				return false
+			}
+
+			if algorithm == jws.RS256 {
+				sha := sha256.New()
+				sha.Write([]byte(encodedHeader))
+				sha.Write([]byte{'.'})
+				sha.Write([]byte(encodedPayload))
+				hashed := sha.Sum(nil)
+
+				return rsa.VerifyPKCS1v15(&publicKey, crypto.SHA256, hashed, signature) == nil
+			} else if algorithm == jws.RS384 {
+				sha := sha512.New384()
+				sha.Write([]byte(encodedHeader))
+				sha.Write([]byte{'.'})
+				sha.Write([]byte(encodedPayload))
+				hashed := sha.Sum(nil)
+
+				return rsa.VerifyPKCS1v15(&publicKey, crypto.SHA384, hashed, signature) == nil
+			} else if algorithm == jws.RS512 {
+				sha := sha512.New()
+				sha.Write([]byte(encodedHeader))
+				sha.Write([]byte{'.'})
+				sha.Write([]byte(encodedPayload))
+				hashed := sha.Sum(nil)
+
+				return rsa.VerifyPKCS1v15(&publicKey, crypto.SHA512, hashed, signature) == nil
+			} else if algorithm == jws.PS256 {
+				sha := sha256.New()
+				sha.Write([]byte(encodedHeader))
+				sha.Write([]byte{'.'})
+				sha.Write([]byte(encodedPayload))
+				hashed := sha.Sum(nil)
+
+				return rsa.VerifyPSS(&publicKey, crypto.SHA256, hashed, signature, nil) == nil
+			} else if algorithm == jws.PS384 {
+				sha := sha512.New384()
+				sha.Write([]byte(encodedHeader))
+				sha.Write([]byte{'.'})
+				sha.Write([]byte(encodedPayload))
+				hashed := sha.Sum(nil)
+
+				return rsa.VerifyPSS(&publicKey, crypto.SHA384, hashed, signature, nil) == nil
+			} else if algorithm == jws.PS512 {
+				sha := sha512.New()
+				sha.Write([]byte(encodedHeader))
+				sha.Write([]byte{'.'})
+				sha.Write([]byte(encodedPayload))
+				hashed := sha.Sum(nil)
+
+				return rsa.VerifyPSS(&publicKey, crypto.SHA512, hashed, signature, nil) == nil
+			}
+		default:
+			return false
+		}
+	case []byte:
+		if publicKey == nil {
+			return false
+		}
+
+		switch algorithm {
+		case jws.HS256, jws.HS384, jws.HS512:
+			var h hash.Hash
+			if algorithm == jws.HS256 {
+				if len(publicKey) < 32 {
+					return false
+				}
+				h = hmac.New(sha256.New, publicKey)
+			} else if algorithm == jws.HS384 {
+				if len(publicKey) < 48 {
+					return false
+				}
+				h = hmac.New(sha512.New384, publicKey)
+			} else if algorithm == jws.HS512 {
+				if len(publicKey) < 64 {
+					return false
+				}
+				h = hmac.New(sha512.New, publicKey)
+			}
+
+			h.Write([]byte(encodedHeader))
+			h.Write([]byte{'.'})
+			h.Write([]byte(encodedPayload))
+
+			hmacsha := h.Sum(nil)
+
+			// The comparison of the computed HMAC to the JWS Signature MUST be done in a constant-time manner to
+			// thwart timing attacks.
+			// https://datatracker.ietf.org/doc/html/rfc7518#section-3.2
+			return subtle.ConstantTimeCompare(hmacsha, signature) == 1
+		default:
+			return false
+		}
+	case ed25519.PublicKey:
+		if algorithm != jws.EdDSA {
+			return false
+		}
+
+		if publicKey == nil {
+			return false
+		}
+
+		// TODO: impl
+		panic("unimplemented")
+	case ecdsa.PublicKey:
+		switch algorithm {
+		case jws.ES256, jws.ES384, jws.ES512:
+			// TODO: impl
+			panic("unimplemented")
+		default:
+			return false
+		}
+	}
+
+	return false
+}
+
 // https://datatracker.ietf.org/doc/html/rfc7519#section-7.2
 func Verify(s string, signingKey jws.SigningKey) error {
+step1:
 	parts := strings.Split(s, ".")
 	// 1. Verify that the JWT contains at least one period (".") character
 	if len(parts) <= 1 {
-		return ValidationError("JWT doesn't contain any periods.")
+		return ErrMalformedJWT
 	}
 
 	// 2. Let the Encoded JOSE Header be the portion of the JWT before the first period ('.') character.
@@ -439,7 +563,7 @@ func Verify(s string, signingKey jws.SigningKey) error {
 	//    representation of a completely valid JSON object conforming to
 	//    RFC 7159 [RFC7159]; let the JOSE Header be this JSON object.
 	if !json.Valid(header) {
-		return ValidationError("JWT Header is not valid JSON")
+		return ErrInvalidJSON
 	}
 
 	// 5. Verify that the resulting JOSE Header includes only parameters
@@ -452,14 +576,16 @@ func Verify(s string, signingKey jws.SigningKey) error {
 		return err
 	}
 	if jose.Algorithm.String() == "" {
-		return ValidationError("Algorithm is Missing")
+		return ErrMissingAlgorithm
 	}
+
+	var message []byte
 
 	// 6. Determine whether the JWT is a JWS or a JWE
 	if jose.Encryption == "" {
 		// This is a JWS
 		// 7. Validate JWS
-		_, err := base64.RawURLEncoding.DecodeString(parts[1])
+		message, err = base64.RawURLEncoding.DecodeString(parts[1])
 		if err != nil {
 			return err
 		}
@@ -468,24 +594,34 @@ func Verify(s string, signingKey jws.SigningKey) error {
 			return err
 		}
 
-		computedSignature, err := computeSignature(jose.Algorithm, signingKey, parts[0], parts[1])
-		if err != nil {
-			return err
+		if !verifySignature(jose.Algorithm, signingKey, parts[0], parts[1], signature) {
+			return ErrValidation
 		}
 
-		// The comparison of the computed HMAC value to the JWS Signature MUST be done in a constant-time manner to
-		// thwart timing attacks.
-		// https://datatracker.ietf.org/doc/html/rfc7518#section-3.2
-		if subtle.ConstantTimeCompare(computedSignature, signature) == 0 {
-			return ValidationError(fmt.Sprintf("Invalid signature:\nExpected: %v\nGot: %v", signature, computedSignature))
-		}
 	} else {
 		// This is a JWE
 		// 7. Validate JWE
 		// TODO:
 	}
 
-	return nil
+	// 8. If the JOSE header contains a "cty" value of "JWT" then the message is a JWT that was subject of nested
+	//    signing or encryption operations. In this case, return to step 1, using the message as the JWT
+	if jose.ContentType == "JWT" {
+		s = string(message)
+		goto step1
+	}
+
+	// 9. Otherwise base64url decode the message following the restrictions that no line feeds, whitespace, or other
+	//    additional characters have been used.
+	// NOTE: Already done in 7
+
+	// 10. Verify that the resulting octet sequence is a UTF-8-encoded
+	//     representation of a completely valid JSON object conforming to
+	//     RFC 7159 [RFC7159]; let the JWT Claims Set be this JSON object
+	var payload JWTPayload
+	err = json.Unmarshal(message, &payload)
+
+	return err
 }
 
 // TODO: Add support for JWE JWTs
